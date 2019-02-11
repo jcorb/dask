@@ -11,13 +11,22 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 import pandas.util.testing as tm
-from pandas.api.types import is_categorical_dtype, is_scalar
+from pandas.api.types import (
+    is_categorical_dtype, is_scalar, is_sparse, is_period_dtype,
+)
 try:
     from pandas.api.types import is_datetime64tz_dtype
 except ImportError:
     # pandas < 0.19.2
     from pandas.core.common import is_datetime64tz_dtype
 
+try:
+    from pandas.api.types import is_interval_dtype
+except ImportError:
+    is_interval_dtype = lambda dtype: False
+
+from .extensions import make_array_nonempty
+from ..base import is_dask_collection
 from ..compatibility import PY2, Iterator, Mapping
 from ..core import get_deps
 from ..local import get_sync
@@ -25,6 +34,20 @@ from ..utils import asciitable, is_arraylike, Dispatch
 
 
 PANDAS_VERSION = LooseVersion(pd.__version__)
+PANDAS_GT_0240 = PANDAS_VERSION >= LooseVersion("0.24.0rc1")
+HAS_INT_NA = PANDAS_GT_0240
+
+
+def is_integer_na_dtype(t):
+    dtype = getattr(t, 'dtype', t)
+    if HAS_INT_NA:
+        types = (
+            pd.Int8Dtype, pd.Int16Dtype, pd.Int32Dtype, pd.Int64Dtype,
+            pd.UInt8Dtype, pd.UInt16Dtype, pd.UInt32Dtype, pd.UInt64Dtype,
+        )
+    else:
+        types = ()
+    return isinstance(dtype, types)
 
 
 def shard_df_on_index(df, divisions):
@@ -427,6 +450,7 @@ def _nonempty_scalar(x):
 
 @meta_nonempty.register(pd.Series)
 def _nonempty_series(s, idx=None):
+    # TODO: Use register dtypes with make_array_nonempty
     if idx is None:
         idx = _nonempty_index(s.index)
     dtype = s.dtype
@@ -442,11 +466,49 @@ def _nonempty_series(s, idx=None):
             cats = None
         data = pd.Categorical(data, categories=cats,
                               ordered=s.cat.ordered)
+    elif is_integer_na_dtype(dtype):
+        data = pd.array([1, None], dtype=dtype)
+    elif is_period_dtype(dtype):
+        # pandas 0.24.0+ should infer this to be Series[Period[freq]]
+        freq = dtype.freq
+        data = [pd.Period('2000', freq), pd.Period('2001', freq)]
+    elif is_sparse(dtype):
+        # TODO: pandas <0.24
+        # Pandas <= 0.23.4:
+        if PANDAS_GT_0240:
+            entry = _scalar_from_dtype(dtype.subtype)
+        else:
+            entry = _scalar_from_dtype(dtype.subtype)
+        data = pd.SparseArray([entry, entry], dtype=dtype)
+    elif is_interval_dtype(dtype):
+        entry = _scalar_from_dtype(dtype.subtype)
+        if PANDAS_GT_0240:
+            data = pd.array([entry, entry], dtype=dtype)
+        else:
+            data = np.array([entry, entry], dtype=dtype)
+    elif type(dtype) in make_array_nonempty._lookup:
+        data = make_array_nonempty(dtype)
     else:
         entry = _scalar_from_dtype(dtype)
         data = np.array([entry, entry], dtype=dtype)
 
     return pd.Series(data, name=s.name, index=idx)
+
+
+def is_dataframe_like(df):
+    """ Looks like a Pandas DataFrame """
+    return set(dir(df)) > {'dtypes', 'columns', 'groupby', 'head'} and not isinstance(df, type)
+
+
+def is_series_like(s):
+    """ Looks like a Pandas Series """
+    return set(dir(s)) > {'name', 'dtype', 'groupby', 'head'} and not isinstance(s, type)
+
+
+def is_index_like(s):
+    """ Looks like a Pandas Index """
+    attrs = set(dir(s))
+    return attrs > {'name', 'dtype'} and 'head' not in attrs and not isinstance(s, type)
 
 
 def check_meta(x, meta, funcname=None, numeric_equal=True):
@@ -474,7 +536,7 @@ def check_meta(x, meta, funcname=None, numeric_equal=True):
     def equal_dtypes(a, b):
         if is_categorical_dtype(a) != is_categorical_dtype(b):
             return False
-        if (a is '-' or b is '-'):
+        if isinstance(a, str) and a == '-' or isinstance(b, str) and b == '-':
             return False
         if is_categorical_dtype(a) and is_categorical_dtype(b):
             # Pandas 0.21 CategoricalDtype compat
@@ -485,13 +547,10 @@ def check_meta(x, meta, funcname=None, numeric_equal=True):
             return a == b
         return (a.kind in eq_types and b.kind in eq_types) or (a == b)
 
-    from .core import parallel_types
-    if not isinstance(meta, parallel_types()):
+    if (not (is_dataframe_like(meta) or is_series_like(meta) or is_index_like(meta))
+            or is_dask_collection(meta)):
         raise TypeError("Expected partition to be DataFrame, Series, or "
                         "Index, got `%s`" % type(meta).__name__)
-
-    def is_dataframe_like(df):
-        return all(hasattr(df, attr) for attr in ['dtypes', 'columns', 'groupby', 'head'])
 
     if type(x) != type(meta):
         errmsg = ("Expected partition of type `%s` but got "

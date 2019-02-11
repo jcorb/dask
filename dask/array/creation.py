@@ -175,7 +175,7 @@ def full_like(a, fill_value, dtype=None, chunks=None):
     )
 
 
-def linspace(start, stop, num=50, endpoint=True, retstep=False, chunks=None,
+def linspace(start, stop, num=50, endpoint=True, retstep=False, chunks='auto',
              dtype=None):
     """
     Return `num` evenly spaced values over the closed interval [`start`,
@@ -214,9 +214,6 @@ def linspace(start, stop, num=50, endpoint=True, retstep=False, chunks=None,
     dask.array.arange
     """
     num = int(num)
-
-    if chunks is None:
-        raise ValueError("Must supply a chunks= keyword argument")
 
     chunks = normalize_chunks(chunks, (num,))
 
@@ -296,17 +293,16 @@ def arange(*args, **kwargs):
         arange takes 3 positional arguments: arange([start], stop, [step])
         ''')
 
-    try:
-        chunks = kwargs.pop('chunks')
-    except KeyError:
-        raise TypeError("Required argument 'chunks' not found")
+    chunks = kwargs.pop('chunks', 'auto')
 
     num = int(max(np.ceil((stop - start) / step), 0))
-    chunks = normalize_chunks(chunks, (num,))
 
     dtype = kwargs.pop('dtype', None)
     if dtype is None:
         dtype = np.arange(start, stop, step * num if num else step).dtype
+
+    chunks = normalize_chunks(chunks, (num,), dtype=dtype)
+
     if kwargs:
         raise TypeError("Unexpected keyword argument(s): %s" %
                         ",".join(kwargs.keys()))
@@ -364,7 +360,7 @@ def meshgrid(*xi, **kwargs):
     return grid
 
 
-def indices(dimensions, dtype=int, chunks=None):
+def indices(dimensions, dtype=int, chunks='auto'):
     """
     Implements NumPy's ``indices`` for Dask Arrays.
 
@@ -388,9 +384,6 @@ def indices(dimensions, dtype=int, chunks=None):
     -------
     grid : dask array
     """
-    if chunks is None:
-        raise ValueError("Must supply a chunks= keyword argument")
-
     dimensions = tuple(dimensions)
     dtype = np.dtype(dtype)
     chunks = tuple(chunks)
@@ -613,9 +606,8 @@ def _np_fromfunction(func, shape, dtype, offset, func_kwargs):
 
 
 @wraps(np.fromfunction)
-def fromfunction(func, chunks=None, shape=None, dtype=None, **kwargs):
-    if chunks:
-        chunks = normalize_chunks(chunks, shape)
+def fromfunction(func, chunks='auto', shape=None, dtype=None, **kwargs):
+    chunks = normalize_chunks(chunks, shape)
     name = 'fromfunction-' + tokenize(func, chunks, shape, dtype, kwargs)
     keys = list(product([name], *[range(len(bd)) for bd in chunks]))
     aggdims = [list(accumulate(add, (0,) + bd[:-1])) for bd in chunks]
@@ -702,15 +694,15 @@ def expand_pad_value(array, pad_value):
     elif (isinstance(pad_value, Sequence) and
           len(pad_value) == 2 and
           all(isinstance(pw, Number) for pw in pad_value)):
-            pad_value = tuple(
-                (pad_value[0], pad_value[1]) for _ in range(array.ndim)
-            )
+        pad_value = tuple(
+            (pad_value[0], pad_value[1]) for _ in range(array.ndim)
+        )
     elif (isinstance(pad_value, Sequence) and
           len(pad_value) == array.ndim and
           all(isinstance(pw, Sequence) for pw in pad_value) and
           all((len(pw) == 2) for pw in pad_value) and
           all(all(isinstance(w, Number) for w in pw) for pw in pad_value)):
-            pad_value = tuple((pw[0], pw[1]) for pw in pad_value)
+        pad_value = tuple((pw[0], pw[1]) for pw in pad_value)
     else:
         raise TypeError(
             "`pad_value` must be composed of integral typed values."
@@ -776,7 +768,7 @@ def pad_edge(array, pad_width, mode, *args):
         pad_shapes, pad_chunks = get_pad_shapes_chunks(result, pad_width, (d,))
         pad_arrays = [result, result]
 
-        if mode is "constant":
+        if mode == "constant":
             constant_values = args[0][d]
             constant_values = [
                 asarray(c).astype(result.dtype) for c in constant_values
@@ -796,12 +788,12 @@ def pad_edge(array, pad_width, mode, *args):
 
             pad_arrays = [result[sl] for sl in pad_slices]
 
-            if mode is "edge":
+            if mode == "edge":
                 pad_arrays = [
                     broadcast_to(a, s, c)
                     for a, s, c in zip(pad_arrays, pad_shapes, pad_chunks)
                 ]
-            elif mode is "linear_ramp":
+            elif mode == "linear_ramp":
                 end_values = args[0][d]
 
                 pad_arrays = [

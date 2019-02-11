@@ -16,7 +16,8 @@ from dask.base import compute_as_if_collection
 from dask.compatibility import PY2
 from dask.utils import put_lines, M
 
-from dask.dataframe.core import repartition_divisions, aca, _concat, Scalar
+from dask.dataframe.core import (repartition_divisions, aca, _concat, Scalar,
+                                 has_parallel_type)
 from dask.dataframe import methods
 from dask.dataframe.utils import (assert_eq, make_meta, assert_max_deps,
                                   PANDAS_VERSION)
@@ -550,6 +551,12 @@ def test_map_partitions():
     assert result.dtype in (np.int32, np.int64) and result.compute() == 2
     result = dd.map_partitions(lambda x: 4.0, x)
     assert result.dtype == np.float64 and result.compute() == 4.0
+
+
+def test_map_partitions_type():
+    result = d.map_partitions(type).compute(scheduler='single-threaded')
+    assert isinstance(result, pd.Series)
+    assert all(x == pd.DataFrame for x in result)
 
 
 def test_map_partitions_names():
@@ -3204,6 +3211,9 @@ def test_map_partition_array(func):
 
 def test_map_partition_sparse():
     sparse = pytest.importorskip('sparse')
+    # Aviod searchsorted failure.
+    pytest.importorskip("numba", minversion="0.40.0")
+
     df = pd.DataFrame({'x': [1, 2, 3, 4, 5],
                        'y': [6.0, 7.0, 8.0, 9.0, 10.0]},
                       index=['a', 'b', 'c', 'd', 'e'])
@@ -3364,3 +3374,9 @@ def test_scalar_with_array():
 
     da.utils.assert_eq(df.x.values + df.x.mean(),
                        ddf.x.values + ddf.x.mean())
+
+
+def test_has_parallel_type():
+    assert has_parallel_type(pd.DataFrame())
+    assert has_parallel_type(pd.Series())
+    assert not has_parallel_type(123)
